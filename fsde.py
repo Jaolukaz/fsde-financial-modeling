@@ -2,11 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 ===================================================================================
-Modeling Stock Time Evolution Using a Fractional Stochastic Differential Equation:
-Reproducing Stylized Facts Through Multifractal Volatility
+From a Log-Correlated Gaussian Field to the Inverse Cubic Law: Multifractal Volatility in Financial Returns
 ===================================================================================
 
-Supplementary Material (revised version, resubmission to Physica A, PHYSA-261157).
+Supplementary Material (revised version 2 - PHYSA-261157)
 
 Authors:
     Joao Lucas de Pinho Carvalho
@@ -18,9 +17,7 @@ Authors:
     Belo Horizonte, MG, Brazil
 
 Reference:
-    CARVALHO, J.L.P., LIMA, L.S. (2026) - Modeling Stock Time Evolution Using
-    a Fractional Stochastic Differential Equation: Reproducing Stylized Facts
-    Through Multifractal Volatility. Physica A.
+    CARVALHO, J.L.P., LIMA, L.S. (2026) - From a Log-Correlated Gaussian Field to the Inverse Cubic Law: Multifractal Volatility in Financial Returns. Physica A.
 ===================================================================================
 """
 
@@ -39,7 +36,7 @@ from scipy.stats import kurtosis, linregress, skew, t as student_t, probplot, sh
 warnings.filterwarnings("ignore")
 
 # =============================================================================
-# CONFIGURATION - single source of truth for all parameters
+# CONFIGURATION
 # =============================================================================
 
 SEED = 42
@@ -59,10 +56,6 @@ SEED = 42
 @dataclass
 class FSDEParameters:
     """Parameters of the FSDE model.
-
-    The fractional structure now lives in the volatility field; the return
-    innovations are Brownian (H_returns = 0.5). H_returns is retained as an
-    explicit field so that the Brownian limit is documented rather than implicit.
     """
 
     H_returns: float = 0.5
@@ -79,15 +72,10 @@ class FSDEParameters:
 
     @property
     def theoretical_alpha(self) -> float:
-        """Tail exponent predicted by the log-normal cascade moment-existence
-        threshold: q*^2 ~ 2/lambda^2, hence alpha ~ sqrt(2/lambda^2).
 
-        This replaces the arithmetically untenable alpha = 1/lambda^2 of the
-        first submission (which gave alpha in [20,50] for lambda^2 in [0.02,0.05]).
-        With lambda^2 = 0.10 this yields alpha ~ 4.5, compatible with the
-        simulated regime.
-        """
-        return float(np.sqrt(2.0 / self.lambda_sq)) if self.lambda_sq > 0 else np.inf
+        if self.lambda_sq > 0:
+            return float(np.sqrt(2.0 / self.lambda_sq) - 1.0)
+        return np.inf
 
 
 # Master configuration instance used throughout.
@@ -124,13 +112,14 @@ class MFDFAResult:
 
 @dataclass
 class TailResult:
-    """Clauset-Shalizi-Newman + Hill tail-fit result."""
+    """Clauset-Shalizi-Newman + Hill tail-fit result.
+    """
 
     tail: str
     x_min: float
     n_tail: int
-    alpha_csn: float
-    alpha_csn_ci: Tuple[float, float]
+    alpha_csn: float               # CCDF convention
+    alpha_csn_ci: Tuple[float, float]  # CCDF convention
     ks_distance: float
     p_value: float
     hill_alpha: float
@@ -319,14 +308,7 @@ class FSDEModel:
     def _apply_leverage(sigma_t: np.ndarray, innovations: np.ndarray,
                         beta: float, kernel_len: int = 60,
                         decay: float = 20.0) -> np.ndarray:
-        """Pochart-Bouchaud-style leverage kernel: past (standardized) return
-        innovations feed negatively into current log-volatility, generating
-        negative return-volatility correlation and thus negative skewness.
 
-        log sigma(t) -> log sigma(t) - beta * sum_{u>0} K(u) eps(t-u),
-        with an exponential kernel K(u) ~ exp(-u/decay). beta > 0 makes
-        downward moves raise subsequent volatility.
-        """
         lags = np.arange(1, kernel_len + 1)
         kernel = np.exp(-lags / decay)
         kernel /= kernel.sum()
@@ -361,12 +343,7 @@ def compute_statistics(returns: np.ndarray) -> Dict:
 # =============================================================================
 
 def _powerlaw_alpha_mle(data: np.ndarray, x_min: float) -> Tuple[float, np.ndarray]:
-    """Continuous power-law MLE for the scaling exponent given x_min.
 
-    For a continuous power law p(x) ~ x^{-alpha} on x >= x_min, the MLE is
-        alpha = 1 + n / sum_i ln(x_i / x_min).
-    Returns (alpha, tail_data).
-    """
     tail = data[data >= x_min]
     n = len(tail)
     if n < 10:
@@ -509,19 +486,24 @@ def analyze_tail(returns: np.ndarray, tail: str = "positive",
         data = np.abs(returns[returns < 0])
     data = data[data > 0]
 
-    alpha_csn, x_min, ks, n_tail, xmin_grid, alpha_stab = fit_powerlaw_csn(data)
-    p_val = csn_bootstrap_pvalue(data, alpha_csn, x_min, n_boot=n_boot, seed=seed)
+    # --- CSN fit (internally density convention) ---
+    alpha_pdf, x_min, ks, n_tail, xmin_grid, alpha_stab_pdf = fit_powerlaw_csn(data)
+    p_val = csn_bootstrap_pvalue(data, alpha_pdf, x_min, n_boot=n_boot, seed=seed)
 
-    # Hill at k equal to the number of CSN-tail observations.
+    # Convert CSN density exponent to CCDF: alpha_CCDF = alpha_pdf - 1.
+    alpha_csn = alpha_pdf - 1.0 if np.isfinite(alpha_pdf) else np.nan
+    alpha_stab = alpha_stab_pdf - 1.0  # stability curve in CCDF convention
+
+    # Hill at k equal to the number of CSN-tail observations (already CCDF).
     sorted_desc = np.sort(data)[::-1]
     k_hill = max(10, int(n_tail))
     k_hill = min(k_hill, len(data) - 2)
     hill_alpha, _ = hill_estimator(data, k_hill)
 
-    # CIs via bootstrap.
+    # CIs via bootstrap --- CSN CI also converted to CCDF.
     def _csn_stat(d):
         a, *_ = fit_powerlaw_csn(d)
-        return a
+        return a - 1.0 if np.isfinite(a) else np.nan   # density -> CCDF
 
     def _hill_stat(d):
         return hill_estimator(d, min(k_hill, len(d) - 2))[0]
@@ -637,11 +619,6 @@ def mfdfa(data: np.ndarray, q_values: np.ndarray = None,
 def shuffle_test(series: np.ndarray, n_shuffle: int = 200, seed: int = SEED,
                  n_min: int = 10, n_max: Optional[int] = None) -> Dict:
     """Compare the DFA Hurst exponent of a series with its shuffled surrogates.
-
-    Shuffling destroys temporal ordering. A Hurst exponent that drops to ~0.5
-    after shuffling is consistent with, but not proof of, genuine long memory:
-    the test cannot by itself distinguish long memory from regime switching or
-    structural breaks. This caveat is stated explicitly in the manuscript.
     """
     H_obs = dfa(series, n_min=n_min, n_max=n_max).H
     rng = np.random.default_rng(seed)
@@ -678,14 +655,7 @@ def rolling_hurst(series: np.ndarray, window: int = 756, step: int = 21,
 
 def estimate_lambda_sq(returns: np.ndarray, L: float = 252.0,
                        lag_min: int = 1, lag_max: int = 60) -> Tuple[float, float]:
-    """Estimate the intermittency parameter lambda^2 from the slope of the
-    autocovariance of ln|r| against ln(lag), following the MRW relation
 
-        Cov[ln|r_t|, ln|r_{t+tau}|] ~ -lambda^2 ln(tau) + const,   1 << tau << L.
-
-    Returns (lambda_sq_hat, se). The minus-slope of the log-lag regression is the
-    estimate of lambda^2.
-    """
     r = returns[np.abs(returns) > 0]
     x = np.log(np.abs(r))
     x = x - np.mean(x)
@@ -844,9 +814,10 @@ def plot_ccdf(tp: TailResult, tn: TailResult, name: str, alpha_ref: float = 3.0)
         if np.isfinite(tr.alpha_csn) and tr.x_min > 0:
             xs = np.logspace(np.log10(tr.x_min), np.log10(tr.x_ccdf.max()), 100)
             p_at_xmin = np.mean(tr.x_ccdf >= tr.x_min)
-            ys = p_at_xmin * (xs / tr.x_min) ** (-(tr.alpha_csn - 1.0))
+            # alpha_csn is now CCDF: P(X>x) ~ x^{-alpha_csn}
+            ys = p_at_xmin * (xs / tr.x_min) ** (-tr.alpha_csn)
             ax.loglog(xs, ys, "-", color=fitcol, lw=2,
-                      label=fr"$\alpha = {tr.alpha_csn:.2f}$")
+                      label=fr"$\alpha_{{\mathrm{{CCDF}}}} = {tr.alpha_csn:.2f}$")
             ax.axvline(tr.x_min, color="gray", ls=":", lw=1.2,
                        label=fr"$x_{{\min}} = {tr.x_min:.3f}$")
         ax.set_xlabel(r"$|r|$")
@@ -878,9 +849,9 @@ def plot_hill_stability(tp: TailResult, tn: TailResult, name: str):
                  label=f"{lab} tail")
         if np.isfinite(tr.x_min):
             ax2.axvline(tr.x_min, color=col, ls=":", lw=1.0)
-    ax2.axhline(3.0, color=COLORS["ref"], ls="--", lw=1.2, label=r"$\alpha = 3$")
+    ax2.axhline(3.0, color=COLORS["ref"], ls="--", lw=1.2, label=r"$\alpha_{\mathrm{CCDF}} = 3$")
     ax2.set_xlabel(r"$x_{\min}$")
-    ax2.set_ylabel(r"CSN $\hat{\alpha}(x_{\min})$")
+    ax2.set_ylabel(r"CSN $\hat{\alpha}_{\mathrm{CCDF}}(x_{\min})$")
     ax2.set_title("(b) Threshold stability", fontweight="bold")
     ax2.set_ylim(0, 8)
     ax2.legend(framealpha=0.95)
@@ -912,6 +883,7 @@ def plot_dfa(dfa_ret: DFAResult, dfa_vol: DFAResult, name: str):
 
 
 def plot_mfdfa(mf_ret: MFDFAResult, mf_vol: MFDFAResult, name: str):
+    """Original MF-DFA plot (used for empirical data, which is a single series)."""
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.errorbar(mf_ret.q_values, mf_ret.Hq, yerr=mf_ret.Hq_se, fmt="o-",
                 color=COLORS["dfa_ret"], capsize=3,
@@ -923,6 +895,29 @@ def plot_mfdfa(mf_ret: MFDFAResult, mf_vol: MFDFAResult, name: str):
     ax.set_ylabel(r"$H(q)$")
     ax.set_title(f"Generalized Hurst spectrum (MF-DFA) - {name}", fontweight="bold")
     ax.legend(framealpha=0.95)
+    plt.tight_layout()
+    return fig
+
+
+def plot_mfdfa_aggregated(scaling: 'PerRealizationScaling',
+                          hq_mrw: np.ndarray, lambda_sq: float,
+                          name: str):
+    """MF-DFA plot with per-realization mean ± std and MRW analytical benchmark."""
+    fig, ax = plt.subplots(figsize=(8, 6))
+    q = scaling.q_values
+    ax.errorbar(q, scaling.Hq_ret_mean, yerr=scaling.Hq_ret_std, fmt="o-",
+                color=COLORS["dfa_ret"], capsize=3,
+                label=fr"returns ($B = {scaling.B_ret_mean:.3f} \pm {scaling.B_ret_std:.3f}$)")
+    ax.errorbar(q, scaling.Hq_vol_mean, yerr=scaling.Hq_vol_std, fmt="s-",
+                color=COLORS["dfa_vol"], capsize=3,
+                label=fr"$|$returns$|$ ($B = {scaling.B_vol_mean:.3f} \pm {scaling.B_vol_std:.3f}$)")
+    # MRW analytical prediction
+    ax.plot(q, hq_mrw, "k--", lw=2.0, alpha=0.7,
+            label=fr"MRW analytical ($B = {-lambda_sq/2:.3f}$)")
+    ax.set_xlabel(r"$q$")
+    ax.set_ylabel(r"$H(q)$")
+    ax.set_title(f"Generalized Hurst spectrum (MF-DFA) - {name}", fontweight="bold")
+    ax.legend(framealpha=0.95, fontsize=10)
     plt.tight_layout()
     return fig
 
@@ -1001,6 +996,217 @@ def pooled_returns(params: FSDEParameters, n_realizations: int, T: int,
                            for i in range(n_realizations)])
 
 
+# =============================================================================
+# PER-REALIZATION SCALING (Item 3 fix: no concatenation for DFA/MF-DFA)
+# =============================================================================
+
+@dataclass
+class PerRealizationScaling:
+    """Aggregated DFA/MF-DFA results across independent realizations.
+
+    DFA and MF-DFA are computed on each realization separately, with the maximum
+    scale restricted to T // 4 (DFA) or T // 10 (MF-DFA), and the per-realization
+    estimates are then aggregated with mean and standard deviation. This corrects
+    the methodological error of concatenating independent trajectories and running
+    DFA/MF-DFA across the artificial boundaries.
+    """
+
+    # DFA returns
+    H_ret_values: np.ndarray       # per-realization H_DFA of returns
+    H_ret_mean: float
+    H_ret_std: float
+    H_ret_ci: Tuple[float, float]
+
+    # DFA absolute returns (volatility proxy)
+    H_vol_values: np.ndarray
+    H_vol_mean: float
+    H_vol_std: float
+    H_vol_ci: Tuple[float, float]
+
+    # MF-DFA returns
+    B_ret_values: np.ndarray       # per-realization multiscaling slope B
+    B_ret_mean: float
+    B_ret_std: float
+    Hq_ret_mean: np.ndarray        # mean H(q) curve across realizations
+    Hq_ret_std: np.ndarray
+
+    # MF-DFA absolute returns
+    B_vol_values: np.ndarray
+    B_vol_mean: float
+    B_vol_std: float
+    Hq_vol_mean: np.ndarray
+    Hq_vol_std: np.ndarray
+
+    # Shared q grid
+    q_values: np.ndarray
+
+    # Shuffle test (on a single representative realization)
+    shuffle_result: Dict
+
+
+def per_realization_scaling(params: FSDEParameters, n_realizations: int = 20,
+                            T: int = 2520, seed: int = SEED) -> PerRealizationScaling:
+    """Compute DFA and MF-DFA per realization, then aggregate.
+
+    Each realization is analysed independently with n_max = T // 4 for DFA
+    and n_max = T // 10 for MF-DFA. This avoids the methodological error of
+    fitting DFA/MF-DFA windows that span boundaries between independently
+    simulated trajectories.
+    """
+    model = FSDEModel(params)
+
+    q_values = np.array([-5, -4, -3, -2, -1, 0.0001, 1, 2, 3, 4, 5], dtype=float)
+    dfa_nmax = T // 4
+    mf_nmax = T // 10
+
+    H_ret_list, H_vol_list = [], []
+    B_ret_list, B_vol_list = [], []
+    Hq_ret_all, Hq_vol_all = [], []
+
+    for i in range(n_realizations):
+        _, returns, _ = model.simulate(100.0, T, seed=seed + i)
+        abs_ret = np.abs(returns)
+
+        # DFA
+        dfa_r = dfa(returns, n_min=10, n_max=dfa_nmax)
+        dfa_v = dfa(abs_ret, n_min=10, n_max=dfa_nmax)
+        H_ret_list.append(dfa_r.H)
+        H_vol_list.append(dfa_v.H)
+
+        # MF-DFA
+        mf_r = mfdfa(returns, q_values=q_values, n_min=16, n_max=mf_nmax)
+        mf_v = mfdfa(abs_ret, q_values=q_values, n_min=16, n_max=mf_nmax)
+        B_ret_list.append(mf_r.slope_B)
+        B_vol_list.append(mf_v.slope_B)
+        Hq_ret_all.append(mf_r.Hq)
+        Hq_vol_all.append(mf_v.Hq)
+
+    H_ret = np.array(H_ret_list)
+    H_vol = np.array(H_vol_list)
+    B_ret = np.array(B_ret_list)
+    B_vol = np.array(B_vol_list)
+    Hq_ret_all = np.array(Hq_ret_all)
+    Hq_vol_all = np.array(Hq_vol_all)
+
+    # 95% CI from quantiles of per-realization distribution
+    def _ci(arr):
+        return (float(np.percentile(arr, 2.5)), float(np.percentile(arr, 97.5)))
+
+    # Shuffle test on the first realization (representative)
+    _, r0, _ = model.simulate(100.0, T, seed=seed)
+    sh = shuffle_test(np.abs(r0), n_shuffle=100, seed=seed,
+                      n_min=10, n_max=dfa_nmax)
+
+    return PerRealizationScaling(
+        H_ret_values=H_ret, H_ret_mean=float(np.mean(H_ret)),
+        H_ret_std=float(np.std(H_ret)), H_ret_ci=_ci(H_ret),
+        H_vol_values=H_vol, H_vol_mean=float(np.mean(H_vol)),
+        H_vol_std=float(np.std(H_vol)), H_vol_ci=_ci(H_vol),
+        B_ret_values=B_ret, B_ret_mean=float(np.mean(B_ret)),
+        B_ret_std=float(np.std(B_ret)),
+        Hq_ret_mean=np.nanmean(Hq_ret_all, axis=0),
+        Hq_ret_std=np.nanstd(Hq_ret_all, axis=0),
+        B_vol_values=B_vol, B_vol_mean=float(np.mean(B_vol)),
+        B_vol_std=float(np.std(B_vol)),
+        Hq_vol_mean=np.nanmean(Hq_vol_all, axis=0),
+        Hq_vol_std=np.nanstd(Hq_vol_all, axis=0),
+        q_values=q_values,
+        shuffle_result=sh,
+    )
+
+
+# =============================================================================
+# BOOTSTRAP CIs FOR KURTOSIS AND SKEWNESS  (Item 6)
+# =============================================================================
+
+def per_realization_moments(params: FSDEParameters, n_realizations: int = 20,
+                            T: int = 2520, seed: int = SEED) -> Dict:
+    """Compute kurtosis and skewness per realization, returning distributions
+    and confidence intervals."""
+    model = FSDEModel(params)
+    kurt_list, skew_list = [], []
+    for i in range(n_realizations):
+        _, r, _ = model.simulate(100.0, T, seed=seed + i)
+        kurt_list.append(float(kurtosis(r, fisher=True)))
+        skew_list.append(float(skew(r)))
+    ka = np.array(kurt_list)
+    sa = np.array(skew_list)
+    return {
+        "kurtosis_per_real": ka,
+        "kurtosis_mean": float(np.mean(ka)),
+        "kurtosis_std": float(np.std(ka)),
+        "kurtosis_ci": (float(np.percentile(ka, 2.5)), float(np.percentile(ka, 97.5))),
+        "skewness_per_real": sa,
+        "skewness_mean": float(np.mean(sa)),
+        "skewness_std": float(np.std(sa)),
+        "skewness_median": float(np.median(sa)),
+        "skewness_ci": (float(np.percentile(sa, 2.5)), float(np.percentile(sa, 97.5))),
+    }
+
+
+# =============================================================================
+# MRW ANALYTICAL COMPARISON  (Item 6)
+# =============================================================================
+
+def mrw_analytical_hq(q_values: np.ndarray, lambda_sq: float) -> np.ndarray:
+    """Analytical prediction for the generalized Hurst exponent H(q) of the
+    MRW (multifractal random walk) with Brownian return innovations:
+
+        h(q) = 1/2 - lambda^2 (q - 1) / 2.
+    """
+    return 0.5 - lambda_sq * (q_values - 1.0) / 2.0
+
+
+# =============================================================================
+# EXPERIMENT AT EMPIRICAL LAMBDA^2  (Item 5)
+# =============================================================================
+
+def run_at_empirical_lambda(lambda_sq_values: List[float],
+                            base_params: FSDEParameters,
+                            n_realizations: int = 20,
+                            T: int = 2520, n_boot: int = 300,
+                            seed: int = SEED) -> List[Dict]:
+    """Run the full pipeline at each lambda^2 value, using the corrected
+    per-realization DFA methodology and CCDF tail convention."""
+    results = []
+    for lsq in lambda_sq_values:
+        print(f"\n  === lambda^2 = {lsq:.4f} ===")
+        p = FSDEParameters(H_returns=base_params.H_returns, lambda_sq=lsq,
+                           sigma0=base_params.sigma0, mu=base_params.mu,
+                           L=base_params.L)
+        # Pooled returns for marginal/tail statistics
+        pooled = pooled_returns(p, n_realizations, T, seed=seed)
+
+        # Marginal statistics
+        stats = compute_statistics(pooled)
+
+        # Per-realization moments
+        moments = per_realization_moments(p, n_realizations, T, seed=seed)
+
+        # Tails (CCDF convention)
+        tp = analyze_tail(pooled, "positive", n_boot=n_boot, seed=seed)
+        tn = analyze_tail(pooled, "negative", n_boot=n_boot, seed=seed)
+
+        # Per-realization scaling
+        scaling = per_realization_scaling(p, n_realizations, T, seed=seed)
+
+        # Lambda calibration
+        lam_hat, lam_se = estimate_lambda_sq(pooled, L=p.L)
+
+        results.append({
+            "lambda_sq": lsq,
+            "params": p,
+            "stats": stats,
+            "moments": moments,
+            "tp": tp,
+            "tn": tn,
+            "scaling": scaling,
+            "lambda_hat": (lam_hat, lam_se),
+            "alpha_pred": p.theoretical_alpha,
+        })
+    return results
+
+
 def run_sensitivity(params: FSDEParameters, lambda_values=None,
                     n_realizations: int = 5, T: int = 2520, seed: int = SEED) -> Dict:
     if lambda_values is None:
@@ -1022,21 +1228,7 @@ def run_sensitivity(params: FSDEParameters, lambda_values=None,
 def run_leverage_sweep(params: FSDEParameters, beta_values=None,
                        n_realizations: int = 60, T: int = 2520,
                        seed: int = SEED) -> Dict:
-    """Sweep the Pochart-Bouchaud leverage coefficient beta to find the value
-    that brings the simulated skewness toward the empirical range (about -0.34
-    to -0.39), while checking that the tail and persistence properties are not
-    materially disturbed.
 
-    Skewness of heavy-tailed samples has very high sampling variance, so for
-    each beta the skewness is reported both from a large pooled sample and as
-    the median of the per-realization skewness, which is the more robust
-    summary. Excess kurtosis and the DFA exponent of the absolute returns are
-    reported alongside so that any distortion of the rest of the construction
-    is visible.
-
-    The symmetric baseline (beta = 0) is included as the first row for
-    reference. Returns a dictionary with one entry per beta.
-    """
     if beta_values is None:
         beta_values = [0.0, 0.6, 0.9, 1.2, 1.5, 2.0]
 
@@ -1073,37 +1265,40 @@ def run_leverage_sweep(params: FSDEParameters, beta_values=None,
 def summarize_simulation(params: FSDEParameters, n_realizations: int = 20,
                          T: int = 2520, n_boot: int = 300, seed: int = SEED,
                          make_figures: bool = True) -> Dict:
-    """Compute every simulated number reported in the manuscript, with CIs."""
-    print(f"  pooling {n_realizations} x {T} steps ...")
+    """Compute every simulated number reported in the manuscript, with CIs.
+
+    Tail and marginal statistics use pooled realizations (correct for marginal
+    distributions). DFA and MF-DFA use per-realization estimation with Monte
+    Carlo aggregation (Items 1, 3, 6 fix).
+    """
+    print(f"  pooling {n_realizations} x {T} steps (marginal/tail stats) ...")
     model = FSDEModel(params)
     prices, comp = model.simulate(100.0, T, seed=seed, return_components=True)
     pooled = pooled_returns(params, n_realizations, T, seed=seed)
-    abs_pooled = np.abs(pooled)
 
     stats = compute_statistics(pooled)
-    # robust skewness: median across realizations
-    sk_real = [skew(model.simulate(100.0, T, seed=seed + i)[1]) for i in range(n_realizations)]
-    stats["skewness_median"] = float(np.median(sk_real))
 
-    print("  tails ...")
+    # Per-realization moments with CIs (Item 6)
+    print("  per-realization moments ...")
+    moments = per_realization_moments(params, n_realizations, T, seed=seed)
+    stats["skewness_median"] = moments["skewness_median"]
+    stats["kurtosis_ci"] = moments["kurtosis_ci"]
+    stats["skewness_ci"] = moments["skewness_ci"]
+    stats["kurtosis_per_real_mean"] = moments["kurtosis_mean"]
+    stats["kurtosis_per_real_std"] = moments["kurtosis_std"]
+
+    print("  tails (CCDF convention) ...")
     tp = analyze_tail(pooled, "positive", n_boot=n_boot, seed=seed)
     tn = analyze_tail(pooled, "negative", n_boot=n_boot, seed=seed)
 
-    print("  DFA / MF-DFA ...")
-    dfa_ret = dfa(pooled, n_min=10, n_max=len(pooled) // 10)
-    dfa_vol = dfa(abs_pooled, n_min=10, n_max=len(abs_pooled) // 10)
-    H_ret_ci = block_bootstrap_ci(pooled, lambda d: dfa(d, n_min=10, n_max=len(d)//10).H,
-                                  block_size=252, n_boot=200, seed=seed + 3)
-    H_vol_ci = block_bootstrap_ci(abs_pooled, lambda d: dfa(d, n_min=10, n_max=len(d)//10).H,
-                                  block_size=252, n_boot=200, seed=seed + 4)
-    mf_ret = mfdfa(pooled)
-    mf_vol = mfdfa(abs_pooled)
-
-    print("  shuffle test ...")
-    sh = shuffle_test(abs_pooled[:T], n_shuffle=100, seed=seed)
+    print("  per-realization DFA / MF-DFA ...")
+    scaling = per_realization_scaling(params, n_realizations, T, seed=seed)
 
     print("  lambda calibration ...")
     lam_hat, lam_se = estimate_lambda_sq(pooled, L=params.L)
+
+    # MRW analytical comparison (Item 6)
+    hq_mrw = mrw_analytical_hq(scaling.q_values, params.lambda_sq)
 
     figs = {}
     if make_figures:
@@ -1114,15 +1309,23 @@ def summarize_simulation(params: FSDEParameters, n_realizations: int = 20,
         figs["volpdf"] = save_fig(plot_volatility_pdf(comp["volatility"]), "fsde_volpdf.png")
         figs["ccdf"] = save_fig(plot_ccdf(tp, tn, "FSDE simulation"), "fsde_ccdf.png")
         figs["hill"] = save_fig(plot_hill_stability(tp, tn, "FSDE simulation"), "fsde_hill.png")
-        figs["dfa"] = save_fig(plot_dfa(dfa_ret, dfa_vol, "FSDE simulation"), "fsde_dfa.png")
-        figs["mfdfa"] = save_fig(plot_mfdfa(mf_ret, mf_vol, "FSDE simulation"), "fsde_mfdfa.png")
+        # DFA plot uses a representative realization (first) for the fluctuation
+        # function, since per-realization means are reported numerically.
+        _, r0, _ = model.simulate(100.0, T, seed=seed)
+        dfa_r0 = dfa(r0, n_min=10, n_max=T // 4)
+        dfa_v0 = dfa(np.abs(r0), n_min=10, n_max=T // 4)
+        figs["dfa"] = save_fig(plot_dfa(dfa_r0, dfa_v0, "FSDE simulation (single realization)"),
+                               "fsde_dfa.png")
+        # MF-DFA plot: use per-realization mean H(q) with error bars
+        figs["mfdfa"] = save_fig(
+            plot_mfdfa_aggregated(scaling, hq_mrw, params.lambda_sq,
+                                  "FSDE simulation (per-realization mean)"),
+            "fsde_mfdfa.png")
 
     return {
-        "stats": stats, "tp": tp, "tn": tn,
-        "dfa_ret": dfa_ret, "dfa_vol": dfa_vol,
-        "H_ret_ci": H_ret_ci, "H_vol_ci": H_vol_ci,
-        "mf_ret": mf_ret, "mf_vol": mf_vol,
-        "shuffle": sh, "lambda_hat": (lam_hat, lam_se),
+        "stats": stats, "moments": moments, "tp": tp, "tn": tn,
+        "scaling": scaling, "hq_mrw": hq_mrw,
+        "shuffle": scaling.shuffle_result, "lambda_hat": (lam_hat, lam_se),
         "alpha_pred": params.theoretical_alpha,
         "figs": figs, "n_pooled": len(pooled),
     }
@@ -1132,14 +1335,35 @@ def summarize_empirical(market: MarketData, n_boot: int = 300, seed: int = SEED,
                         make_figures: bool = True) -> Dict:
     r = market.returns
     stats = compute_statistics(r)
+
+    # Bootstrap CIs for kurtosis and skewness (Item 6)
+    kurt_ci = block_bootstrap_ci(r, lambda d: float(kurtosis(d, fisher=True)),
+                                 block_size=252, n_boot=n_boot, seed=seed + 10)
+    skew_ci = block_bootstrap_ci(r, lambda d: float(skew(d)),
+                                 block_size=252, n_boot=n_boot, seed=seed + 11)
+    stats["kurtosis_ci"] = kurt_ci
+    stats["skewness_ci"] = skew_ci
+
     tp = analyze_tail(r, "positive", n_boot=n_boot, seed=seed)
     tn = analyze_tail(r, "negative", n_boot=n_boot, seed=seed)
     dfa_ret = dfa(r, n_min=10, n_max=len(r) // 4)
     dfa_vol = dfa(np.abs(r), n_min=10, n_max=len(r) // 4)
+    H_ret_ci = block_bootstrap_ci(r, lambda d: dfa(d, n_min=10, n_max=len(d)//4).H,
+                                  block_size=252, n_boot=200, seed=seed + 6)
     H_vol_ci = block_bootstrap_ci(np.abs(r), lambda d: dfa(d, n_min=10, n_max=len(d)//4).H,
                                   block_size=252, n_boot=200, seed=seed + 5)
+
     mf_ret = mfdfa(r)
     mf_vol = mfdfa(np.abs(r))
+
+    # Bootstrap CIs for MF-DFA slopes (Item 6)
+    B_ret_ci = block_bootstrap_ci(r,
+        lambda d: mfdfa(d, n_min=16, n_max=len(d)//10).slope_B,
+        block_size=252, n_boot=200, seed=seed + 7)
+    B_vol_ci = block_bootstrap_ci(np.abs(r),
+        lambda d: mfdfa(d, n_min=16, n_max=len(d)//10).slope_B,
+        block_size=252, n_boot=200, seed=seed + 8)
+
     sh = shuffle_test(np.abs(r), n_shuffle=100, seed=seed)
     lam_hat, lam_se = estimate_lambda_sq(r, L=252.0)
     centers, H_roll = rolling_hurst(np.abs(r), window=756, step=21)
@@ -1156,40 +1380,53 @@ def summarize_empirical(market: MarketData, n_boot: int = 300, seed: int = SEED,
             f"emp_{key}_rolling.png")
 
     return {"stats": stats, "tp": tp, "tn": tn, "dfa_ret": dfa_ret, "dfa_vol": dfa_vol,
-            "H_vol_ci": H_vol_ci, "mf_ret": mf_ret, "mf_vol": mf_vol, "shuffle": sh,
+            "H_ret_ci": H_ret_ci, "H_vol_ci": H_vol_ci,
+            "mf_ret": mf_ret, "mf_vol": mf_vol,
+            "B_ret_ci": B_ret_ci, "B_vol_ci": B_vol_ci,
+            "shuffle": sh,
             "lambda_hat": (lam_hat, lam_se), "figs": figs,
             "rolling": (centers, H_roll)}
 
 
 def _fmt_tail(t: TailResult) -> str:
     return (f"x_min={t.x_min:.4f} n_tail={t.n_tail} "
-            f"alpha_csn={t.alpha_csn:.3f} CI[{t.alpha_csn_ci[0]:.2f},{t.alpha_csn_ci[1]:.2f}] "
-            f"p={t.p_value:.3f} hill={t.hill_alpha:.3f} "
+            f"alpha_CCDF(CSN)={t.alpha_csn:.3f} CI[{t.alpha_csn_ci[0]:.2f},{t.alpha_csn_ci[1]:.2f}] "
+            f"p={t.p_value:.3f} alpha_CCDF(Hill)={t.hill_alpha:.3f} "
             f"CI[{t.hill_ci[0]:.2f},{t.hill_ci[1]:.2f}]")
 
 
-def report(sim: Dict, sens: Dict, emp: Dict, lev: Dict = None):
+def report(sim: Dict, sens: Dict, emp: Dict, lev: Dict = None,
+           lam_experiments: List[Dict] = None):
     print("\n" + "=" * 70)
     print("SIMULATED RESULTS  (config: H_returns={}, lambda_sq={}, sigma0={}, L={})".format(
         CONFIG.H_returns, CONFIG.lambda_sq, CONFIG.sigma0, CONFIG.L))
+    print("  ALL TAIL EXPONENTS IN CCDF CONVENTION: P(X>x) ~ x^{-alpha}")
     print("=" * 70)
     s = sim["stats"]
+    sc = sim["scaling"]
+    m = sim["moments"]
     print(f"n_pooled            = {sim['n_pooled']}")
     print(f"ann. volatility     = {s['annualized_volatility']*100:.2f}%")
-    print(f"excess kurtosis     = {s['kurtosis']:.2f}")
+    print(f"excess kurtosis     = {s['kurtosis']:.2f} (pooled)")
+    print(f"  per-real mean     = {m['kurtosis_mean']:.2f} +/- {m['kurtosis_std']:.2f}")
+    print(f"  per-real 95% CI   = [{m['kurtosis_ci'][0]:.2f}, {m['kurtosis_ci'][1]:.2f}]")
     print(f"skewness (pooled)   = {s['skewness']:.4f}")
-    print(f"skewness (median)   = {s['skewness_median']:.4f}")
-    print(f"alpha predicted     = {sim['alpha_pred']:.3f}  [sqrt(2/lambda^2)]")
+    print(f"  median (per-real) = {m['skewness_median']:.4f}")
+    print(f"  per-real 95% CI   = [{m['skewness_ci'][0]:.4f}, {m['skewness_ci'][1]:.4f}]")
+    print(f"alpha_CCDF predicted= {sim['alpha_pred']:.3f}  [sqrt(2/lambda^2) - 1]")
     print(f"POS tail: {_fmt_tail(sim['tp'])}")
     print(f"NEG tail: {_fmt_tail(sim['tn'])}")
-    print(f"H_DFA returns       = {sim['dfa_ret'].H:.3f} (se {sim['dfa_ret'].H_se:.3f}) "
-          f"CI[{sim['H_ret_ci'][0]:.3f},{sim['H_ret_ci'][1]:.3f}]")
-    print(f"H_DFA |returns|     = {sim['dfa_vol'].H:.3f} (se {sim['dfa_vol'].H_se:.3f}) "
-          f"CI[{sim['H_vol_ci'][0]:.3f},{sim['H_vol_ci'][1]:.3f}]")
-    print(f"MF-DFA B (returns)  = {sim['mf_ret'].slope_B:.4f} (se {sim['mf_ret'].slope_B_se:.4f})")
-    print(f"MF-DFA B (|returns|)= {sim['mf_vol'].slope_B:.4f} (se {sim['mf_vol'].slope_B_se:.4f})")
-    sh = sim["shuffle"]
-    print(f"shuffle |r|: H_obs={sh['H_observed']:.3f} H_shuf={sh['H_shuffled_mean']:.3f}"
+    print(f"--- Per-realization DFA (n_max = T/4 = {2520//4}) ---")
+    print(f"H_DFA returns       = {sc.H_ret_mean:.3f} +/- {sc.H_ret_std:.3f} "
+          f"CI[{sc.H_ret_ci[0]:.3f},{sc.H_ret_ci[1]:.3f}]")
+    print(f"H_DFA |returns|     = {sc.H_vol_mean:.3f} +/- {sc.H_vol_std:.3f} "
+          f"CI[{sc.H_vol_ci[0]:.3f},{sc.H_vol_ci[1]:.3f}]")
+    print(f"--- Per-realization MF-DFA ---")
+    print(f"MF-DFA B (returns)  = {sc.B_ret_mean:.4f} +/- {sc.B_ret_std:.4f}")
+    print(f"MF-DFA B (|returns|)= {sc.B_vol_mean:.4f} +/- {sc.B_vol_std:.4f}")
+    print(f"MRW analytical B    = {-CONFIG.lambda_sq/2:.4f}")
+    sh = sc.shuffle_result
+    print(f"shuffle |r| (1 real): H_obs={sh['H_observed']:.3f} H_shuf={sh['H_shuffled_mean']:.3f}"
           f"+-{sh['H_shuffled_std']:.3f} z={sh['z_score']:.1f}")
     print(f"lambda_sq_hat       = {sim['lambda_hat'][0]:.4f}")
 
@@ -1209,21 +1446,51 @@ def report(sim: Dict, sens: Dict, emp: Dict, lev: Dict = None):
         print("  (choose the largest beta whose exc_kurt and H_vol stay close to")
         print("   the beta=0 row, then report its skew_pooled/skew_median in 3.5)")
 
+    if lam_experiments:
+        print("\n" + "=" * 70)
+        print("EMPIRICAL-LAMBDA EXPERIMENTS (Item 5)")
+        print("=" * 70)
+        for exp in lam_experiments:
+            lsq = exp["lambda_sq"]
+            sc2 = exp["scaling"]
+            m2 = exp["moments"]
+            st2 = exp["stats"]
+            print(f"\n--- lambda^2 = {lsq:.4f} ---")
+            print(f"  alpha_CCDF pred   = {exp['alpha_pred']:.3f}")
+            print(f"  ann. volatility   = {st2['annualized_volatility']*100:.2f}%")
+            print(f"  excess kurtosis   = {st2['kurtosis']:.2f} (pooled)")
+            print(f"    per-real mean   = {m2['kurtosis_mean']:.2f} +/- {m2['kurtosis_std']:.2f}")
+            print(f"    per-real CI     = [{m2['kurtosis_ci'][0]:.2f}, {m2['kurtosis_ci'][1]:.2f}]")
+            print(f"  skewness (pooled) = {st2['skewness']:.4f}")
+            print(f"  POS tail: {_fmt_tail(exp['tp'])}")
+            print(f"  NEG tail: {_fmt_tail(exp['tn'])}")
+            print(f"  H_DFA returns     = {sc2.H_ret_mean:.3f} +/- {sc2.H_ret_std:.3f} "
+                  f"CI[{sc2.H_ret_ci[0]:.3f},{sc2.H_ret_ci[1]:.3f}]")
+            print(f"  H_DFA |returns|   = {sc2.H_vol_mean:.3f} +/- {sc2.H_vol_std:.3f} "
+                  f"CI[{sc2.H_vol_ci[0]:.3f},{sc2.H_vol_ci[1]:.3f}]")
+            print(f"  MF-DFA B ret/vol  = {sc2.B_ret_mean:.4f} / {sc2.B_vol_mean:.4f}")
+            print(f"  lambda_sq_hat     = {exp['lambda_hat'][0]:.4f}")
+
     print("\n" + "=" * 70)
-    print("EMPIRICAL RESULTS")
+    print("EMPIRICAL RESULTS  (CCDF convention)")
     print("=" * 70)
     if not emp:
         print("  [no network] empirical block not run; use [[RODAR]] markers in text.")
     for key, e in emp.items():
         st = e["stats"]
         print(f"\n[{key}]")
-        print(f"  excess kurtosis = {st['kurtosis']:.2f}  skewness = {st['skewness']:.4f}")
+        print(f"  excess kurtosis = {st['kurtosis']:.2f}  CI[{st['kurtosis_ci'][0]:.2f},{st['kurtosis_ci'][1]:.2f}]")
+        print(f"  skewness        = {st['skewness']:.4f}  CI[{st['skewness_ci'][0]:.4f},{st['skewness_ci'][1]:.4f}]")
         print(f"  POS {_fmt_tail(e['tp'])}")
         print(f"  NEG {_fmt_tail(e['tn'])}")
-        print(f"  H_DFA returns   = {e['dfa_ret'].H:.3f} (se {e['dfa_ret'].H_se:.3f})")
+        print(f"  H_DFA returns   = {e['dfa_ret'].H:.3f} (se {e['dfa_ret'].H_se:.3f}) "
+              f"CI[{e['H_ret_ci'][0]:.3f},{e['H_ret_ci'][1]:.3f}]")
         print(f"  H_DFA |returns| = {e['dfa_vol'].H:.3f} (se {e['dfa_vol'].H_se:.3f}) "
               f"CI[{e['H_vol_ci'][0]:.3f},{e['H_vol_ci'][1]:.3f}]")
-        print(f"  MF-DFA B ret/vol= {e['mf_ret'].slope_B:.4f} / {e['mf_vol'].slope_B:.4f}")
+        print(f"  MF-DFA B ret    = {e['mf_ret'].slope_B:.4f} (se {e['mf_ret'].slope_B_se:.4f}) "
+              f"CI[{e['B_ret_ci'][0]:.4f},{e['B_ret_ci'][1]:.4f}]")
+        print(f"  MF-DFA B vol    = {e['mf_vol'].slope_B:.4f} (se {e['mf_vol'].slope_B_se:.4f}) "
+              f"CI[{e['B_vol_ci'][0]:.4f},{e['B_vol_ci'][1]:.4f}]")
         sh = e["shuffle"]
         print(f"  shuffle |r|: H_obs={sh['H_observed']:.3f} -> shuf {sh['H_shuffled_mean']:.3f} z={sh['z_score']:.1f}")
         print(f"  lambda_sq_hat   = {e['lambda_hat'][0]:.4f}")
@@ -1231,8 +1498,8 @@ def report(sim: Dict, sens: Dict, emp: Dict, lev: Dict = None):
 
 def main(n_realizations: int = 20, T: int = 2520, n_boot: int = 300,
          seed: int = SEED, make_figures: bool = True, fetch_empirical: bool = True,
-         run_leverage: bool = True) -> Dict:
-    print("FSDE pipeline (revised)")
+         run_leverage: bool = True, run_lambda_experiments: bool = True) -> Dict:
+    print("FSDE pipeline (R2 revision)")
     print("-" * 40)
     print("Phase A-D: simulated summary")
     sim = summarize_simulation(CONFIG, n_realizations=n_realizations, T=T,
@@ -1249,6 +1516,14 @@ def main(n_realizations: int = 20, T: int = 2520, n_boot: int = 300,
         lev = run_leverage_sweep(CONFIG, n_realizations=max(60, n_realizations * 3),
                                  T=T, seed=seed)
 
+    # Item 5: simulate at empirical lambda^2 values
+    lam_experiments = None
+    if run_lambda_experiments:
+        print("Lambda-experiment runs (Item 5: lambda^2 = 0.037, 0.014)")
+        lam_experiments = run_at_empirical_lambda(
+            [0.037, 0.014], CONFIG, n_realizations=n_realizations, T=T,
+            n_boot=n_boot, seed=seed)
+
     emp = {}
     if fetch_empirical:
         print("Phase E-F: empirical validation")
@@ -1258,8 +1533,9 @@ def main(n_realizations: int = 20, T: int = 2520, n_boot: int = 300,
                 emp[nm] = summarize_empirical(md, n_boot=n_boot, seed=seed,
                                               make_figures=make_figures)
 
-    report(sim, sens, emp, lev)
-    return {"simulated": sim, "sensitivity": sens, "empirical": emp, "leverage": lev}
+    report(sim, sens, emp, lev, lam_experiments)
+    return {"simulated": sim, "sensitivity": sens, "empirical": emp,
+            "leverage": lev, "lambda_experiments": lam_experiments}
 
 
 if __name__ == "__main__":
